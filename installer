@@ -1,169 +1,402 @@
 #!/usr/bin/env python3
-"""ClaudeLimitBot installer: an interactive menu. Run:  ./installer   (Windows: python installer)"""
-import getpass, json, os, re, shutil, subprocess, sys
+"""ClaudeLimitBot installer, an interactive terminal menu (standard library only).
+
+    ./installer          Linux / macOS
+    python installer     Windows
+
+Arrow keys or j/k to move, Enter to choose, q or Ctrl+C to quit.
+"""
+import getpass, json, os, re, shutil, subprocess, sys, threading, time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 NOTIFY = HERE / "scripts" / "notify.py"
 SEALED = HERE / "sealed.json"
-sys.path.insert(0, str(HERE / "scripts"))
 CFG = Path.home() / ".config/limit-bot/config.json"
 REPO = "SandwichEater577/ClaudeLimitBot"
-MKT, PLUGIN = "claude-limit-bot", "limit-bot"
-WIDTH = 56
+MKT, PLUGIN, VERSION = "claude-limit-bot", "limit-bot", "1.0.0"
+sys.path.insert(0, str(HERE / "scripts"))
 
-if os.name == "nt":
-    os.system("")  # enable ANSI colours on Windows 10+
-USE_COLOR = sys.stdout.isatty() and "NO_COLOR" not in os.environ
-def c(code, s): return f"\033[{code}m{s}\033[0m" if USE_COLOR else s
-orange = lambda s: c("38;5;173", s)
-dim = lambda s: c("2", s)
-green = lambda s: c("32", s)
-red = lambda s: c("31", s)
-bold = lambda s: c("1", s)
+# ─── terminal ──────────────────────────────────────────────────────────────────
 
-
-def banner():
-    logo = [" ▐▛███▜▌", "▝▜█████▛▘", "  ▘▘ ▝▝"]
-    print()
-    print(orange("╭" + "─" * WIDTH + "╮"))
-    row = lambda s="": print(orange("│") + s.center(WIDTH) + orange("│"))
-    row()
-    for l in logo:
-        row(f"{l:<9}")
-    row()
-    row(bold("C L A U D E   L I M I T   B O T"))
-    row(dim("posts to Discord when you hit your limit"))
-    row()
-    print(orange("╰" + "─" * WIDTH + "╯"))
-    print()
+IS_WIN = os.name == "nt"
+if IS_WIN:
+    os.system("")  # turn on ANSI escape handling in Windows 10+ consoles
+TTY = sys.stdin.isatty() and sys.stdout.isatty()
+COLOR = sys.stdout.isatty() and "NO_COLOR" not in os.environ
+ANSI = re.compile(r"\033\[[0-9;?]*[A-Za-z]")
 
 
-def step(msg):
-    print(f"  {orange('▸')} {msg}", end="", flush=True)
-def ok(extra=""):
-    print(f"  {green('✔')} {dim(extra)}")
-def fail(extra=""):
-    print(f"  {red('✘')} {extra}")
+def sgr(code):
+    return lambda s: f"\033[{code}m{s}\033[0m" if COLOR else str(s)
 
+
+ORANGE, PEACH, GREY = sgr("38;5;173"), sgr("38;5;216"), sgr("38;5;245")
+FAINT, GREEN, RED = sgr("38;5;239"), sgr("38;5;114"), sgr("38;5;167")
+BOLD, SELECTED = sgr("1"), sgr("48;5;173;38;5;234;1")
+SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+
+def vlen(s):
+    """Visible width: colour codes take no space on screen."""
+    return len(ANSI.sub("", s))
+
+
+def pad(s, width, align="left"):
+    gap = max(0, width - vlen(s))
+    if align == "center":
+        return " " * (gap // 2) + s + " " * (gap - gap // 2)
+    return s + " " * gap if align == "left" else " " * gap + s
+
+
+def screen_width():
+    return max(46, min(74, shutil.get_terminal_size((80, 24)).columns - 4))
+
+
+def box(lines, width, title="", footer="", align="left", edge=FAINT, rows=0):
+    """A rounded panel: title in the top-left border, footer in the bottom-right one.
+    rows pads the body so panels placed side by side end on the same line."""
+    inner = width - 2
+    lines = list(lines) + [""] * max(0, rows - len(lines))
+    top = edge("╭" + "─" * inner + "╮")
+    if title:
+        label = f" {ORANGE('◆')} {ORANGE(BOLD(title))} "
+        top = edge("╭─") + label + edge("─" * max(0, inner - 1 - vlen(label)) + "╮")
+    bottom = edge("╰" + "─" * inner + "╯")
+    if footer:
+        label = f" {GREY(footer)} "
+        bottom = edge("╰" + "─" * max(0, inner - 2 - vlen(label))) + label + edge("──╯")
+    body = [edge("│") + "  " + pad(line, inner - 4, align) + "  " + edge("│") for line in lines]
+    return [top, *body, bottom]
+
+
+def side_by_side(left, right, gap=2):
+    lw, rw = vlen(left[0]), vlen(right[0])
+    rows = max(len(left), len(right))
+    left = left + [" " * lw] * (rows - len(left))
+    right = right + [" " * rw] * (rows - len(right))
+    return [a + " " * gap + b for a, b in zip(left, right)]
+
+
+def read_key():
+    """One key press: 'up', 'down', 'enter', or the character typed."""
+    if IS_WIN:
+        import msvcrt
+        ch = msvcrt.getwch()
+        if ch in ("\x00", "\xe0"):
+            return {"H": "up", "P": "down"}.get(msvcrt.getwch(), "")
+    else:
+        import select, termios, tty
+        fd = sys.stdin.fileno()
+        old = termios.tcgetattr(fd)
+        try:
+            tty.setraw(fd)
+            ch = os.read(fd, 1).decode(errors="ignore")
+            if ch == "\x1b":
+                seq = os.read(fd, 2).decode(errors="ignore") if select.select([fd], [], [], 0.05)[0] else ""
+                return {"[A": "up", "[B": "down", "OA": "up", "OB": "down"}.get(seq, "esc")
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+    if ch == "\x03":
+        raise KeyboardInterrupt
+    return "enter" if ch in ("\r", "\n") else ch.lower()
+
+
+# ─── work (the demo swaps these out) ───────────────────────────────────────────
 
 def run(cmd):
     return subprocess.run(cmd, capture_output=True, text=True)
 
 
-def checks():
-    print(bold("  CHECKS"))
-    results = {}
-    step("Python 3"); ok(sys.version.split()[0])
-    claude = shutil.which("claude")
-    step("Claude Code"); ok(claude) if claude else fail("not found, install it from https://claude.ai/code")
-    results["claude"] = claude
-    step("Config"); ok(str(CFG)) if CFG.exists() else ok("not set up yet")
-    print()
-    return results
+def unseal_webhook(password):
+    import vault
+    return vault.unseal(password, json.loads(SEALED.read_text()))
 
 
-def ask(prompt, default=None, secret=False):
-    d = f" {dim('[' + default + ']')}" if default else ""
-    q = f"  {orange('❯')} {prompt}{d}: "
-    v = (getpass.getpass(q) if secret else input(q)).strip()
-    return v or default or ""
+def outcome(result, success=""):
+    """Turn a finished command into (ok, detail) for the progress panel."""
+    text = (result.stdout + result.stderr).strip()
+    if result.returncode == 0 or "already" in text.lower():
+        return True, success
+    return False, (text.splitlines() or ["failed"])[-1][:60]
 
 
-def unlock():
-    """Ask for the access password; it decrypts the webhook stored in sealed.json."""
-    import time, vault
-    data = json.loads(SEALED.read_text())
-    for attempt in range(5):
-        pw = ask("Access password (hidden)", secret=True)
-        step("Unlocking")
+# ─── interface ─────────────────────────────────────────────────────────────────
+
+class Installer:
+    def __init__(self):
+        self.claude = shutil.which("claude")
+        self.selected = 0
+        self.plan, self.form, self.log = [], [], []
+        self.status = ""
+        self.items = [
+            ("Install", "Add the plugin to Claude Code and save your settings", self.install),
+            ("Send a test message", "Post a sample message to the Discord channel", self.test),
+            ("Update", "Get the newest version of the plugin", self.update),
+            ("Uninstall", "Remove the plugin and your saved settings", self.uninstall),
+            ("Quit", "Leave the installer", None),
+        ]
+
+    # ── drawing ──
+
+    def header(self, w, compact=False):
+        if compact:  # short terminals: keep the title, drop the artwork
+            return box([BOLD("C L A U D E   L I M I T   B O T")], w, footer=f"v{VERSION}", align="center", edge=ORANGE)
+        logo = [" ▐▛███▜▌ ", "▝▜█████▛▘", "  ▘▘ ▝▝  "]
+        lines = ["", *(PEACH(l) for l in logo), "",
+                 BOLD("C L A U D E   L I M I T   B O T"),
+                 GREY("posts to Discord when you hit your limit"), ""]
+        return box(lines, w, footer=f"v{VERSION}", align="center", edge=ORANGE)
+
+    def checks_panel(self, w, rows=0):
+        claude = "installed" if self.claude else "not found"
+        items = [("Python", sys.version.split()[0], True),
+                ("Claude Code", claude, bool(self.claude)),
+                ("Settings", "saved" if CFG.exists() else "not set up", CFG.exists()),
+                ("Password", "required" if SEALED.exists() else "not needed", True)]
+        lines = []
+        for name, value, good in items:
+            mark = GREEN("✔") if good else (RED("✘") if name == "Claude Code" else GREY("○"))
+            lines.append(f"{mark} {pad(name, 12)}{GREY(value)}")
+        return box(lines, w, "CHECKS", rows=rows)
+
+    def menu_panel(self, w, rows=0):
+        lines = []
+        for i, (label, _, _) in enumerate(self.items):
+            key = "q" if label == "Quit" else str(i + 1)
+            if i == self.selected:
+                lines.append(SELECTED(pad(f" ❯ {label}", w - 9) + f"{key} "))
+            else:
+                lines.append(pad(f"   {label}", w - 9) + FAINT(f"{key} "))
+        return box(lines, w, "MENU", rows=rows)
+
+    def frame(self, compact=False):
+        w = screen_width()
+        out = self.header(w, compact) + [""]
+        left_w = (w - 2) // 2
+        rows = len(self.items)  # both panels share a height so their bottoms line up
+        checks, menu = self.checks_panel(left_w, rows), self.menu_panel(w - 2 - left_w, rows)
+        out += side_by_side(checks, menu) if w >= 60 else checks + menu
+        if self.plan:
+            out += box(self.plan, w, "THIS WILL")
+        if self.form:
+            out += box([f"{GREY(pad(k, 14))}{v}" for k, v in self.form], w, "DETAILS")
+        if self.log:
+            rows = []
+            for state, label, detail in self.log:
+                mark = {"ok": GREEN("✔"), "fail": RED("✘")}.get(state, ORANGE(state))
+                # mark, label, a dotted leader, then the detail flush against the right border
+                gap = w - 8 - len(label) - (len(detail) + 1 if detail else 0)
+                dots = FAINT(" " + "·" * max(1, gap - 1))
+                rows.append(f"{mark} {label}{dots}" + (f" {GREY(detail)}" if detail else ""))
+            out += box(rows, w, "PROGRESS")
+        hint = self.status or GREY(self.items[self.selected][1])
+        out += ["", pad(hint, w, "center"), pad(FAINT("↑↓ move  ·  enter choose  ·  q quit"), w, "center")]
+        return out
+
+    def render(self, below=""):
+        """Draw the whole screen in place: home the cursor, overwrite, clear the rest."""
+        if not TTY:
+            return
+        frame = self.frame()
+        if len(frame) + 2 > shutil.get_terminal_size((80, 24)).lines:
+            frame = self.frame(compact=True)
+        lines = ["  " + line + "\033[K" for line in frame]
+        sys.stdout.write("\033[H" + "\n".join(lines) + "\n\033[J" + below)
+        sys.stdout.flush()
+
+    # ── input ──
+
+    def ask(self, label, default="", secret=False):
+        prompt = f"  {ORANGE('❯')} {BOLD(label)}" + (GREY(f"  [{default}]") if default else "") + "  "
+        if TTY:
+            self.render()
+            sys.stdout.write("\033[?25h")  # show the cursor while typing
         try:
-            hook = vault.unseal(pw, data)
-            ok("password accepted")
-            return hook
-        except ValueError:
-            fail("wrong password")
-            time.sleep(2 * (attempt + 1))
-    fail("Too many attempts. Ask whoever runs the server for the password.")
-    return None
+            value = (getpass.getpass(prompt) if secret else input(prompt)).strip() or default
+        finally:
+            if TTY:
+                sys.stdout.write("\033[?25l")
+        self.form.append((label, "•" * 10 if secret else value))
+        return value
 
+    def confirm(self, question, default=True):
+        hint = "Y/n" if default else "y/N"
+        if not TTY:
+            answer = input(f"  ❯ {question} [{hint}] ").strip().lower()
+            return default if not answer else answer.startswith("y")
+        self.render(f"  {ORANGE('❯')} {BOLD(question)}  {GREY(hint)}")
+        while True:
+            key = read_key()
+            if key in ("y", "n"):
+                return key == "y"
+            if key == "enter":
+                return default
+            if key in ("q", "esc"):
+                return False
 
-def install(claude):
-    if not claude:
-        return fail("Claude Code is required.")
-    print(bold("\n  INSTALL") + dim("   this will:"))
-    print(dim("    ▸ add the ClaudeLimitBot marketplace to Claude Code"))
-    print(dim("    ▸ install the limit-bot plugin (a hook that runs on rate limits)"))
-    print(dim(f"    ▸ save your name, email and webhook to {CFG}"))
-    if ask("Continue? (y/n)", "y").lower() not in ("y", "yes"):
-        return
-    print()
-    cur = json.loads(CFG.read_text()) if CFG.exists() else {}
-    name = ask("Display name", cur.get("name"))
-    email = ask("Email (shown on hover)", cur.get("email"))
-    hook = unlock() if SEALED.exists() else ask("Discord webhook URL (hidden)", cur.get("webhook"), secret=True)
-    if hook is None:
-        return
-    if not (name and email) or not re.match(r"https://(\w+\.)?discord(app)?\.com/api/webhooks/\d+/.+", hook):
-        return fail("Name, email and a valid Discord webhook URL are required.")
-    print()
-    step("Adding marketplace")
-    r = run([claude, "plugin", "marketplace", "add", REPO])
-    ok() if r.returncode == 0 or "already" in (r.stdout + r.stderr).lower() else fail((r.stderr or r.stdout).strip()[:90])
-    step("Installing plugin")
-    r = run([claude, "plugin", "install", f"{PLUGIN}@{MKT}"])
-    ok() if r.returncode == 0 or "already" in (r.stdout + r.stderr).lower() else fail((r.stderr or r.stdout).strip()[:90])
-    step("Saving settings")
-    r = run([sys.executable, str(NOTIFY), "setup", "--name", name, "--email", email, "--webhook", hook])
-    ok("readable only by you") if r.returncode == 0 else fail(r.stderr.strip()[:90])
-    print(green("\n  Done.") + " Restart Claude Code to activate it.")
-    if ask("Send a test message to the channel now? (y/n)", "y").lower() in ("y", "yes"):
-        test()
+    def task(self, label, work):
+        """Run work() in the background with a spinner. work returns (ok, detail)."""
+        self.log.append(("", label, ""))
+        result = {}
+        thread = threading.Thread(target=lambda: result.setdefault("r", work()), daemon=True)
+        thread.start()
+        tick = 0
+        while thread.is_alive():
+            self.log[-1] = (SPIN[tick % len(SPIN)], label, "")
+            self.render()
+            tick += 1
+            time.sleep(0.08)
+        ok, detail = result.get("r", (False, "failed"))
+        self.log[-1] = ("ok" if ok else "fail", label, detail)
+        if TTY:
+            self.render()
+        else:
+            print(f"  {'✔' if ok else '✘'} {label}  {detail}")
+        return ok
 
+    def reset(self):
+        self.plan, self.form, self.log, self.status = [], [], [], ""
 
-def test():
-    step("Sending test message")
-    r = run([sys.executable, str(NOTIFY), "test"])
-    ok("check the channel") if r.returncode == 0 else fail("no config yet, or Discord rejected it")
+    # ── actions ──
 
+    def install(self):
+        if not self.claude:
+            self.status = RED("Claude Code is not installed. Get it from https://claude.ai/code")
+            return
+        self.plan = [f"{ORANGE('▸')} add the ClaudeLimitBot marketplace to Claude Code",
+                     f"{ORANGE('▸')} install the limit-bot plugin, a hook that runs on rate limits",
+                     f"{ORANGE('▸')} save your name, email and webhook to {GREY('~/.config/limit-bot')}"]
+        if not self.confirm("Continue?"):
+            self.status = GREY("Install skipped.")
+            return
+        self.plan = []
+        cur = json.loads(CFG.read_text()) if CFG.exists() else {}
+        name = self.ask("Display name", cur.get("name", ""))
+        email = self.ask("Email", cur.get("email", ""))
+        if not name or not email:
+            self.status = RED("A name and an email are both needed.")
+            return
+        webhook = self.unlock() if SEALED.exists() else self.ask("Webhook URL", cur.get("webhook", ""), secret=True)
+        if not webhook:
+            return
+        if not re.match(r"https://(\w+\.)?discord(app)?\.com/api/webhooks/\d+/.+", webhook):
+            self.status = RED("That is not a Discord webhook URL.")
+            return
+        steps = [
+            ("Adding marketplace", lambda: outcome(run([self.claude, "plugin", "marketplace", "add", REPO]))),
+            ("Installing plugin", lambda: outcome(run([self.claude, "plugin", "install", f"{PLUGIN}@{MKT}"]))),
+            ("Saving settings", lambda: outcome(run([sys.executable, str(NOTIFY), "setup", "--name", name,
+                                                     "--email", email, "--webhook", webhook]), "only you can read it")),
+        ]
+        if all(self.task(label, work) for label, work in steps):
+            self.status = GREEN("Installed. Restart Claude Code to switch it on.")
+            if self.confirm("Send a test message now?"):
+                self.task("Sending test message", lambda: outcome(run([sys.executable, str(NOTIFY), "test"]), "check the channel"))
+        else:
+            self.status = RED("Something failed. The red line above says what.")
 
-def update(claude):
-    step("Updating")
-    r = run([claude, "plugin", "update", f"{PLUGIN}@{MKT}"]) if claude else None
-    ok((r.stdout or "").strip()[:60]) if r and r.returncode == 0 else fail("could not update")
+    def unlock(self):
+        for attempt in range(5):
+            password = self.ask("Password", secret=True)
+            self.form.pop()  # don't stack a row per attempt
+            found = {}
+            def work():
+                try:
+                    found["webhook"] = unseal_webhook(password)
+                    return True, "accepted"
+                except ValueError:
+                    return False, "wrong password"
+            if self.task("Unlocking", work):
+                self.form.append(("Password", GREEN("accepted")))
+                return found["webhook"]
+            time.sleep(1.5 * (attempt + 1))
+        self.status = RED("Too many attempts. Ask whoever runs the server for the password.")
+        return None
 
+    def test(self):
+        self.task("Sending test message",
+                  lambda: outcome(run([sys.executable, str(NOTIFY), "test"]), "check the channel"))
 
-def uninstall(claude):
-    if ask("Remove the plugin and your saved settings? (y/n)", "n").lower() not in ("y", "yes"):
-        return
-    if claude:
-        step("Removing plugin"); run([claude, "plugin", "uninstall", f"{PLUGIN}@{MKT}"]); ok()
-        step("Removing marketplace"); run([claude, "plugin", "marketplace", "remove", MKT]); ok()
-    step("Deleting settings"); shutil.rmtree(CFG.parent, ignore_errors=True); ok()
+    def update(self):
+        if not self.claude:
+            self.status = RED("Claude Code is not installed.")
+            return
+        self.task("Updating plugin", lambda: outcome(run([self.claude, "plugin", "update", f"{PLUGIN}@{MKT}"]), "up to date"))
+
+    def uninstall(self):
+        self.plan = [f"{ORANGE('▸')} remove the limit-bot plugin and its marketplace",
+                     f"{ORANGE('▸')} delete your saved settings in {GREY('~/.config/limit-bot')}"]
+        if not self.confirm("Remove everything?", default=False):
+            self.status = GREY("Nothing was removed.")
+            return
+        self.plan = []
+        if self.claude:
+            self.task("Removing plugin", lambda: outcome(run([self.claude, "plugin", "uninstall", f"{PLUGIN}@{MKT}"])))
+            self.task("Removing marketplace", lambda: outcome(run([self.claude, "plugin", "marketplace", "remove", MKT])))
+        self.task("Deleting settings", lambda: (shutil.rmtree(CFG.parent, ignore_errors=True), (True, ""))[1])
+        self.status = GREEN("Removed.")
+
+    # ── main loop ──
+
+    def choose(self):
+        """Wait for a menu choice; returns the index of the item."""
+        if not TTY:
+            for i, (label, _, _) in enumerate(self.items):
+                print(f"  [{'q' if label == 'Quit' else i + 1}] {label}")
+            key = input("  ❯ Choose: ").strip().lower()
+            return len(self.items) - 1 if key == "q" else int(key) - 1 if key.isdigit() and 0 < int(key) <= len(self.items) else None
+        while True:
+            self.render()
+            key = read_key()
+            if key in ("up", "k"):
+                self.selected = (self.selected - 1) % len(self.items)
+            elif key in ("down", "j"):
+                self.selected = (self.selected + 1) % len(self.items)
+            elif key == "enter":
+                return self.selected
+            elif key in ("q", "esc"):
+                return len(self.items) - 1
+            elif key.isdigit() and 0 < int(key) <= len(self.items):
+                self.selected = int(key) - 1
+                return self.selected
+
+    def loop(self):
+        while True:
+            choice = self.choose()
+            if choice is None:
+                continue
+            action = self.items[choice][2]
+            if action is None:
+                return
+            self.reset()
+            try:
+                action()
+            except KeyboardInterrupt:
+                # Ctrl+C during an action cancels just that action.
+                self.plan = []
+                self.status = RED("Cancelled.")
+            except EOFError:
+                return
 
 
 def main():
-    banner()
-    claude = checks()["claude"]
-    items = [("1", "Install", lambda: install(claude)), ("2", "Send a test message", test),
-             ("3", "Update", lambda: update(claude)), ("4", "Uninstall", lambda: uninstall(claude)),
-             ("q", "Quit", None)]
-    while True:
-        print(bold("  MENU"))
-        for k, label, _ in items:
-            print(f"    {orange('[' + k + ']')} {label}")
-        choice = ask("Choose").lower()
-        for k, _, fn in items:
-            if choice == k:
-                if fn is None:
-                    print(dim("\n  Bye.\n")); return
-                fn(); print(); break
-        else:
-            print(red("  Pick one of the listed keys.\n"))
+    app = Installer()
+    if TTY:
+        sys.stdout.write("\033[?1049h\033[?25l\033[H\033[2J")  # own screen, hidden cursor
+    message = GREY("  Bye.")
+    try:
+        app.loop()
+    except (KeyboardInterrupt, EOFError):
+        message = GREY("  Cancelled.")  # Ctrl+C at the menu leaves cleanly
+    finally:
+        if TTY:
+            sys.stdout.write("\033[?25h\033[?1049l")  # always give the terminal back
+            sys.stdout.flush()
+    print(message)
+    if app.status:
+        print("  " + app.status)
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except (KeyboardInterrupt, EOFError):
-        print(dim("\n  Cancelled.\n"))
+    main()
