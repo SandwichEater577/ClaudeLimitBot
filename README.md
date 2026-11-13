@@ -8,21 +8,24 @@ The name links to your email, which shows on hover. A small card shows the limit
 
 ## Install
 
-You need [Claude Code](https://claude.ai/code), Python 3 and a Discord webhook URL for the channel.
+You need [Claude Code](https://claude.ai/code), Python 3 and a Discord webhook URL for the channel (ask whoever runs your server).
 
 ```bash
-git clone https://github.com/SandwichEater577/ClaudeLimitBot.git
-export DISCORD_WEBHOOK="<webhook url>"          # Windows PowerShell: $env:DISCORD_WEBHOOK="<webhook url>"
-claude --plugin-dir ./ClaudeLimitBot
+git clone https://github.com/SandwichEater577/ClaudeLimitBot.git && cd ClaudeLimitBot && ./installer
 ```
 
-Then, inside Claude Code:
+On Windows, run `python installer` instead of `./installer`.
+
+A menu opens. Choose **Install**, then enter your name, email and the webhook URL. The installer adds the plugin to Claude Code and saves your settings to `~/.config/limit-bot/config.json`, readable only by you. Restart Claude Code afterwards. The menu can also send a test message, update the plugin or remove it.
+
+Prefer to do it by hand? Inside Claude Code:
 
 ```
+/plugin install limit-bot --marketplace SandwichEater577/ClaudeLimitBot
 /limit-bot:setup YourName you@example.com
 ```
 
-Your name, email and webhook are saved to `~/.config/limit-bot/config.json`, readable only by you. The webhook is never stored in this repo.
+The webhook is never stored in this repo.
 
 ## How it works
 

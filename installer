@@ -1,0 +1,147 @@
+#!/usr/bin/env python3
+"""ClaudeLimitBot installer: an interactive menu. Run:  ./installer   (Windows: python installer)"""
+import getpass, json, os, re, shutil, subprocess, sys
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+NOTIFY = HERE / "scripts" / "notify.py"
+CFG = Path.home() / ".config/limit-bot/config.json"
+REPO = "SandwichEater577/ClaudeLimitBot"
+MKT, PLUGIN = "claude-limit-bot", "limit-bot"
+WIDTH = 56
+
+if os.name == "nt":
+    os.system("")  # enable ANSI colours on Windows 10+
+USE_COLOR = sys.stdout.isatty() and "NO_COLOR" not in os.environ
+def c(code, s): return f"\033[{code}m{s}\033[0m" if USE_COLOR else s
+orange = lambda s: c("38;5;173", s)
+dim = lambda s: c("2", s)
+green = lambda s: c("32", s)
+red = lambda s: c("31", s)
+bold = lambda s: c("1", s)
+
+
+def banner():
+    logo = [" ▐▛███▜▌", "▝▜█████▛▘", "  ▘▘ ▝▝"]
+    print()
+    print(orange("╭" + "─" * WIDTH + "╮"))
+    row = lambda s="": print(orange("│") + s.center(WIDTH) + orange("│"))
+    row()
+    for l in logo:
+        row(f"{l:<9}")
+    row()
+    row(bold("C L A U D E   L I M I T   B O T"))
+    row(dim("posts to Discord when you hit your limit"))
+    row()
+    print(orange("╰" + "─" * WIDTH + "╯"))
+    print()
+
+
+def step(msg):
+    print(f"  {orange('▸')} {msg}", end="", flush=True)
+def ok(extra=""):
+    print(f"  {green('✔')} {dim(extra)}")
+def fail(extra=""):
+    print(f"  {red('✘')} {extra}")
+
+
+def run(cmd):
+    return subprocess.run(cmd, capture_output=True, text=True)
+
+
+def checks():
+    print(bold("  CHECKS"))
+    results = {}
+    step("Python 3"); ok(sys.version.split()[0])
+    claude = shutil.which("claude")
+    step("Claude Code"); ok(claude) if claude else fail("not found, install it from https://claude.ai/code")
+    results["claude"] = claude
+    step("Config"); ok(str(CFG)) if CFG.exists() else ok("not set up yet")
+    print()
+    return results
+
+
+def ask(prompt, default=None, secret=False):
+    d = f" {dim('[' + default + ']')}" if default else ""
+    q = f"  {orange('❯')} {prompt}{d}: "
+    v = (getpass.getpass(q) if secret else input(q)).strip()
+    return v or default or ""
+
+
+def install(claude):
+    if not claude:
+        return fail("Claude Code is required.")
+    print(bold("\n  INSTALL") + dim("   this will:"))
+    print(dim("    ▸ add the ClaudeLimitBot marketplace to Claude Code"))
+    print(dim("    ▸ install the limit-bot plugin (a hook that runs on rate limits)"))
+    print(dim(f"    ▸ save your name, email and webhook to {CFG}"))
+    if ask("Continue? (y/n)", "y").lower() not in ("y", "yes"):
+        return
+    print()
+    cur = json.loads(CFG.read_text()) if CFG.exists() else {}
+    name = ask("Display name", cur.get("name"))
+    email = ask("Email (shown on hover)", cur.get("email"))
+    hook = ask("Discord webhook URL (hidden)", cur.get("webhook"), secret=True)
+    if not (name and email) or not re.match(r"https://(\w+\.)?discord(app)?\.com/api/webhooks/\d+/.+", hook):
+        return fail("Name, email and a valid Discord webhook URL are required.")
+    print()
+    step("Adding marketplace")
+    r = run([claude, "plugin", "marketplace", "add", REPO])
+    ok() if r.returncode == 0 or "already" in (r.stdout + r.stderr).lower() else fail((r.stderr or r.stdout).strip()[:90])
+    step("Installing plugin")
+    r = run([claude, "plugin", "install", f"{PLUGIN}@{MKT}"])
+    ok() if r.returncode == 0 or "already" in (r.stdout + r.stderr).lower() else fail((r.stderr or r.stdout).strip()[:90])
+    step("Saving settings")
+    r = run([sys.executable, str(NOTIFY), "setup", "--name", name, "--email", email, "--webhook", hook])
+    ok("readable only by you") if r.returncode == 0 else fail(r.stderr.strip()[:90])
+    print(green("\n  Done.") + " Restart Claude Code to activate it.")
+    if ask("Send a test message to the channel now? (y/n)", "y").lower() in ("y", "yes"):
+        test()
+
+
+def test():
+    step("Sending test message")
+    r = run([sys.executable, str(NOTIFY), "test"])
+    ok("check the channel") if r.returncode == 0 else fail("no config yet, or Discord rejected it")
+
+
+def update(claude):
+    step("Updating")
+    r = run([claude, "plugin", "update", f"{PLUGIN}@{MKT}"]) if claude else None
+    ok((r.stdout or "").strip()[:60]) if r and r.returncode == 0 else fail("could not update")
+
+
+def uninstall(claude):
+    if ask("Remove the plugin and your saved settings? (y/n)", "n").lower() not in ("y", "yes"):
+        return
+    if claude:
+        step("Removing plugin"); run([claude, "plugin", "uninstall", f"{PLUGIN}@{MKT}"]); ok()
+        step("Removing marketplace"); run([claude, "plugin", "marketplace", "remove", MKT]); ok()
+    step("Deleting settings"); shutil.rmtree(CFG.parent, ignore_errors=True); ok()
+
+
+def main():
+    banner()
+    claude = checks()["claude"]
+    items = [("1", "Install", lambda: install(claude)), ("2", "Send a test message", test),
+             ("3", "Update", lambda: update(claude)), ("4", "Uninstall", lambda: uninstall(claude)),
+             ("q", "Quit", None)]
+    while True:
+        print(bold("  MENU"))
+        for k, label, _ in items:
+            print(f"    {orange('[' + k + ']')} {label}")
+        choice = ask("Choose").lower()
+        for k, _, fn in items:
+            if choice == k:
+                if fn is None:
+                    print(dim("\n  Bye.\n")); return
+                fn(); print(); break
+        else:
+            print(red("  Pick one of the listed keys.\n"))
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (KeyboardInterrupt, EOFError):
+        print(dim("\n  Cancelled.\n"))

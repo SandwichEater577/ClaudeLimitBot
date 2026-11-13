@@ -1,0 +1,11 @@
+{
+  "name": "claude-limit-bot",
+  "owner": { "name": "SandwichEater577" },
+  "plugins": [
+    {
+      "name": "limit-bot",
+      "source": "./",
+      "description": "Posts to a Discord channel when you hit your Claude Code usage limit."
+    }
+  ]
+}
