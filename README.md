@@ -8,7 +8,7 @@ The name links to your email, which shows on hover. A small card shows the limit
 
 ## Install
 
-You need [Claude Code](https://claude.ai/code), Python 3 and a Discord webhook URL for the channel (ask whoever runs your server).
+You need [Claude Code](https://claude.ai/code), Python 3 and the access password (ask whoever runs your server).
 
 ```bash
 git clone https://github.com/SandwichEater577/ClaudeLimitBot.git && cd ClaudeLimitBot && ./installer
@@ -16,7 +16,7 @@ git clone https://github.com/SandwichEater577/ClaudeLimitBot.git && cd ClaudeLim
 
 On Windows, run `python installer` instead of `./installer`.
 
-A menu opens. Choose **Install**, then enter your name, email and the webhook URL. The installer adds the plugin to Claude Code and saves your settings to `~/.config/limit-bot/config.json`, readable only by you. Restart Claude Code afterwards. The menu can also send a test message, update the plugin or remove it.
+A menu opens. Choose **Install**, then enter your name, email and the access password. The password unlocks the channel's webhook, which is stored encrypted in `sealed.json` (scrypt key derivation, so every guess is slow). Without the password the webhook can't be read. The installer adds the plugin to Claude Code and saves your settings to `~/.config/limit-bot/config.json`, readable only by you. Restart Claude Code afterwards. The menu can also send a test message, update the plugin or remove it.
 
 Prefer to do it by hand? Inside Claude Code:
 
@@ -25,7 +25,7 @@ Prefer to do it by hand? Inside Claude Code:
 /limit-bot:setup YourName you@example.com
 ```
 
-The webhook is never stored in this repo.
+The webhook is never stored in this repo in plain text. To seal a new one, run `python3 scripts/vault.py seal`.
 
 ## How it works
 

@@ -5,6 +5,8 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 NOTIFY = HERE / "scripts" / "notify.py"
+SEALED = HERE / "sealed.json"
+sys.path.insert(0, str(HERE / "scripts"))
 CFG = Path.home() / ".config/limit-bot/config.json"
 REPO = "SandwichEater577/ClaudeLimitBot"
 MKT, PLUGIN = "claude-limit-bot", "limit-bot"
@@ -68,6 +70,24 @@ def ask(prompt, default=None, secret=False):
     return v or default or ""
 
 
+def unlock():
+    """Ask for the access password; it decrypts the webhook stored in sealed.json."""
+    import time, vault
+    data = json.loads(SEALED.read_text())
+    for attempt in range(5):
+        pw = ask("Access password (hidden)", secret=True)
+        step("Unlocking")
+        try:
+            hook = vault.unseal(pw, data)
+            ok("password accepted")
+            return hook
+        except ValueError:
+            fail("wrong password")
+            time.sleep(2 * (attempt + 1))
+    fail("Too many attempts. Ask whoever runs the server for the password.")
+    return None
+
+
 def install(claude):
     if not claude:
         return fail("Claude Code is required.")
@@ -81,7 +101,9 @@ def install(claude):
     cur = json.loads(CFG.read_text()) if CFG.exists() else {}
     name = ask("Display name", cur.get("name"))
     email = ask("Email (shown on hover)", cur.get("email"))
-    hook = ask("Discord webhook URL (hidden)", cur.get("webhook"), secret=True)
+    hook = unlock() if SEALED.exists() else ask("Discord webhook URL (hidden)", cur.get("webhook"), secret=True)
+    if hook is None:
+        return
     if not (name and email) or not re.match(r"https://(\w+\.)?discord(app)?\.com/api/webhooks/\d+/.+", hook):
         return fail("Name, email and a valid Discord webhook URL are required.")
     print()
