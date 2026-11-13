@@ -1,0 +1,5 @@
+{
+  "name": "limit-bot",
+  "description": "Posts to a Discord channel when you hit your Claude Code usage limit.",
+  "version": "0.1.0"
+}
