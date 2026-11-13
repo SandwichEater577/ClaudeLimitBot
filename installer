@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""ClaudeLimitBot installer, an interactive terminal menu (standard library only).
+"""ClaudeLimitBot installer, an interactive terminal app (standard library only).
 
     ./installer          Linux / macOS
     python installer     Windows
 
-Arrow keys or j/k to move, Enter to choose, q or Ctrl+C to quit.
+Arrow keys or j/k to move, Enter to choose, Esc to go back, Ctrl+C to quit.
 """
 import getpass, json, os, re, shutil, subprocess, sys, threading, time
 from pathlib import Path
@@ -14,7 +14,8 @@ NOTIFY = HERE / "scripts" / "notify.py"
 SEALED = HERE / "sealed.json"
 CFG = Path.home() / ".config/limit-bot/config.json"
 REPO = "SandwichEater577/ClaudeLimitBot"
-MKT, PLUGIN, VERSION = "claude-limit-bot", "limit-bot", "1.0.0"
+MKT, PLUGIN, VERSION = "claude-limit-bot", "limit-bot", "1.2.0"
+TITLE, TAGLINE = "C L A U D E   L I M I T   B O T", "posts to Discord when you hit your limit"
 sys.path.insert(0, str(HERE / "scripts"))
 
 # ─── terminal ──────────────────────────────────────────────────────────────────
@@ -35,6 +36,12 @@ ORANGE, PEACH, GREY = sgr("38;5;173"), sgr("38;5;216"), sgr("38;5;245")
 FAINT, GREEN, RED = sgr("38;5;239"), sgr("38;5;114"), sgr("38;5;167")
 BOLD, SELECTED = sgr("1"), sgr("48;5;173;38;5;234;1")
 SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+FPS = 12
+START = time.time()
+
+
+class Cancel(Exception):
+    """Esc pressed: leave the current screen."""
 
 
 def vlen(s):
@@ -53,9 +60,17 @@ def screen_width():
     return max(46, min(74, shutil.get_terminal_size((80, 24)).columns - 4))
 
 
+def screen_height():
+    return shutil.get_terminal_size((80, 24)).lines
+
+
+def spaced(text):
+    return " ".join(text.upper())
+
+
 def box(lines, width, title="", footer="", align="left", edge=FAINT, rows=0):
     """A rounded panel: title in the top-left border, footer in the bottom-right one.
-    rows pads the body so panels placed side by side end on the same line."""
+    rows pads the body so panels end on the same line."""
     inner = width - 2
     lines = list(lines) + [""] * max(0, rows - len(lines))
     top = edge("╭" + "─" * inner + "╮")
@@ -70,36 +85,62 @@ def box(lines, width, title="", footer="", align="left", edge=FAINT, rows=0):
     return [top, *body, bottom]
 
 
-def side_by_side(left, right, gap=2):
-    lw, rw = vlen(left[0]), vlen(right[0])
-    rows = max(len(left), len(right))
-    left = left + [" " * lw] * (rows - len(left))
-    right = right + [" " * rw] * (rows - len(right))
-    return [a + " " * gap + b for a, b in zip(left, right)]
+def mascot(busy=False, arms_up=False):
+    """The Claude Code character, one animation frame (3 rows, 11 columns).
+    Idle: blinks and waves now and then. Busy: walks in place and sways."""
+    tick = int((time.time() - START) * 8)
+    beat = tick % 48
+    eyes = "▐█████▌" if beat in (20, 21) or beat == 36 else "▐▛███▜▌"
+    waving = arms_up or (not busy and 30 <= beat < 36 and tick % 2 == 0)
+    body = "▗▟█████▙▖" if waving else "▝▜█████▛▘"
+    legs = "▝▝ ▘▘" if busy and (tick // 2) % 2 else "▘▘ ▝▝"
+    shift = (0, 1, 2, 1)[(tick // 3) % 4] - 1 if busy else 0
+    rows = [f" {eyes} ", body, f"  {legs}  "]
+    return [" " * (1 + shift) + row + " " * (1 - shift) for row in rows]
 
 
-def read_key():
-    """One key press: 'up', 'down', 'enter', or the character typed."""
+def read_key(timeout=None):
+    """One key press: 'up', 'down', 'left', 'right', 'enter', 'esc', 'backspace',
+    or the character typed. With a timeout, None when no key arrives in time."""
     if IS_WIN:
         import msvcrt
+        if timeout is not None:
+            end = time.time() + timeout
+            while not msvcrt.kbhit():
+                if time.time() >= end:
+                    return None
+                time.sleep(0.01)
         ch = msvcrt.getwch()
         if ch in ("\x00", "\xe0"):
-            return {"H": "up", "P": "down"}.get(msvcrt.getwch(), "")
-    else:
-        import select, termios, tty
+            return {"H": "up", "P": "down", "K": "left", "M": "right"}.get(msvcrt.getwch(), "")
+    else:  # the terminal is already in key-by-key mode, see key_mode()
+        import select
         fd = sys.stdin.fileno()
-        old = termios.tcgetattr(fd)
-        try:
-            tty.setraw(fd)
-            ch = os.read(fd, 1).decode(errors="ignore")
-            if ch == "\x1b":
-                seq = os.read(fd, 2).decode(errors="ignore") if select.select([fd], [], [], 0.05)[0] else ""
-                return {"[A": "up", "[B": "down", "OA": "up", "OB": "down"}.get(seq, "esc")
-        finally:
-            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        if timeout is not None and not select.select([fd], [], [], timeout)[0]:
+            return None
+        raw = os.read(fd, 1)
+        if raw == b"\x1b":
+            seq = os.read(fd, 2) if select.select([fd], [], [], 0.03)[0] else b""
+            return {b"[A": "up", b"[B": "down", b"[C": "right", b"[D": "left",
+                    b"OA": "up", b"OB": "down", b"OC": "right", b"OD": "left"}.get(seq, "esc")
+        if raw[0] >= 0xC0:  # first byte of a multi-byte character
+            raw += os.read(fd, 1 if raw[0] < 0xE0 else 2 if raw[0] < 0xF0 else 3)
+        ch = raw.decode(errors="ignore")
     if ch == "\x03":
         raise KeyboardInterrupt
-    return "enter" if ch in ("\r", "\n") else ch.lower()
+    return {"\r": "enter", "\n": "enter", "\x7f": "backspace", "\x08": "backspace", "\x1b": "esc", "\t": "tab"}.get(ch, ch)
+
+
+def key_mode():
+    """Switch the terminal to key-by-key input with no echo, once for the whole run.
+    Returns a function that puts it back. Ctrl+C still works (it raises KeyboardInterrupt)."""
+    if IS_WIN or not TTY:
+        return lambda: None
+    import termios, tty
+    fd = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
+    tty.setcbreak(fd)
+    return lambda: termios.tcsetattr(fd, termios.TCSADRAIN, old)
 
 
 # ─── work (the demo swaps these out) ───────────────────────────────────────────
@@ -108,9 +149,17 @@ def run(cmd):
     return subprocess.run(cmd, capture_output=True, text=True)
 
 
-def unseal_webhook(password):
+def unseal_secrets(password):
+    """The password opens sealed.json: the channel webhook and the read-only bot token."""
     import vault
-    return vault.unseal(password, json.loads(SEALED.read_text()))
+    text = vault.unseal(password, json.loads(SEALED.read_text()))
+    return json.loads(text) if text.startswith("{") else {"webhook": text}
+
+
+def find_member(token, username):
+    """(user id, username, seat) for someone on the server, or None."""
+    import notify
+    return notify.find_member(token, username)
 
 
 def outcome(result, success=""):
@@ -121,62 +170,64 @@ def outcome(result, success=""):
     return False, (text.splitlines() or ["failed"])[-1][:60]
 
 
-# ─── interface ─────────────────────────────────────────────────────────────────
+def in_background(work, on_tick):
+    """Run work() on a thread, calling on_tick(frame) until it finishes."""
+    result = {}
+    thread = threading.Thread(target=lambda: result.setdefault("r", work()), daemon=True)
+    thread.start()
+    tick = 0
+    while thread.is_alive():
+        on_tick(tick)
+        tick += 1
+        time.sleep(1 / FPS)
+    return result.get("r")
 
-class Installer:
+
+# ─── the app ───────────────────────────────────────────────────────────────────
+
+class App:
     def __init__(self):
         self.claude = shutil.which("claude")
+        saved = json.loads(CFG.read_text()) if CFG.exists() else {}
+        self.saved = saved
+        self.secrets = {}
         self.selected = 0
         self.plan, self.form, self.log = [], [], []
         self.status = ""
+        self.busy = False
         self.items = [
-            ("Install", "Add the plugin to Claude Code and save your settings", self.install),
-            ("Send a test message", "Post a sample message to the Discord channel", self.test),
-            ("Update", "Get the newest version of the plugin", self.update),
-            ("Uninstall", "Remove the plugin and your saved settings", self.uninstall),
-            ("Quit", "Leave the installer", None),
+            ("Install", "add the plugin and save your settings", self.install),
+            ("Update", "get the newest version", self.update),
+            ("Uninstall", "remove the plugin and your settings", self.uninstall),
+            ("Quit", "leave the installer", None),
         ]
 
     # ── drawing ──
 
-    def header(self, w, compact=False):
-        if compact:  # short terminals: keep the title, drop the artwork
-            return box([BOLD("C L A U D E   L I M I T   B O T")], w, footer=f"v{VERSION}", align="center", edge=ORANGE)
-        logo = [" ▐▛███▜▌ ", "▝▜█████▛▘", "  ▘▘ ▝▝  "]
-        lines = ["", *(PEACH(l) for l in logo), "",
-                 BOLD("C L A U D E   L I M I T   B O T"),
-                 GREY("posts to Discord when you hit your limit"), ""]
-        return box(lines, w, footer=f"v{VERSION}", align="center", edge=ORANGE)
-
-    def checks_panel(self, w, rows=0):
-        claude = "installed" if self.claude else "not found"
-        items = [("Python", sys.version.split()[0], True),
-                ("Claude Code", claude, bool(self.claude)),
-                ("Settings", "saved" if CFG.exists() else "not set up", CFG.exists()),
-                ("Password", "required" if SEALED.exists() else "not needed", True)]
-        lines = []
-        for name, value, good in items:
-            mark = GREEN("✔") if good else (RED("✘") if name == "Claude Code" else GREY("○"))
-            lines.append(f"{mark} {pad(name, 12)}{GREY(value)}")
-        return box(lines, w, "CHECKS", rows=rows)
-
-    def menu_panel(self, w, rows=0):
-        lines = []
-        for i, (label, _, _) in enumerate(self.items):
-            key = "q" if label == "Quit" else str(i + 1)
-            if i == self.selected:
-                lines.append(SELECTED(pad(f" ❯ {label}", w - 9) + f"{key} "))
-            else:
-                lines.append(pad(f"   {label}", w - 9) + FAINT(f"{key} "))
-        return box(lines, w, "MENU", rows=rows)
-
-    def frame(self, compact=False):
+    def hero(self, compact=False, lift=False, arms_up=False, title=TITLE, tagline=TAGLINE):
         w = screen_width()
-        out = self.header(w, compact) + [""]
-        left_w = (w - 2) // 2
-        rows = len(self.items)  # both panels share a height so their bottoms line up
-        checks, menu = self.checks_panel(left_w, rows), self.menu_panel(w - 2 - left_w, rows)
-        out += side_by_side(checks, menu) if w >= 60 else checks + menu
+        if compact:
+            return box([BOLD(title)], w, footer=f"v{VERSION}", align="center", edge=ORANGE)
+        art = [PEACH(row) for row in mascot(self.busy, arms_up)]
+        art = [*art, "", ""] if lift else ["", *art, ""]
+        return box([*art, BOLD(title), GREY(tagline), ""], w, footer=f"v{VERSION}", align="center", edge=ORANGE)
+
+    def show(self, build, below=""):
+        """Draw a screen in place. build(compact) returns its lines; short
+        terminals get the compact hero. Every line is centred."""
+        if not TTY:
+            return
+        lines = build(False)
+        if len(lines) + 2 > screen_height():
+            lines = build(True)
+        w = screen_width()
+        out = ["  " + pad(line, w, "center") + "\033[K" for line in lines]
+        sys.stdout.write("\033[H" + "\n".join(out) + "\n\033[J" + below)
+        sys.stdout.flush()
+
+    def panels(self):
+        w = screen_width()
+        out = []
         if self.plan:
             out += box(self.plan, w, "THIS WILL")
         if self.form:
@@ -185,78 +236,228 @@ class Installer:
             rows = []
             for state, label, detail in self.log:
                 mark = {"ok": GREEN("✔"), "fail": RED("✘")}.get(state, ORANGE(state))
-                # mark, label, a dotted leader, then the detail flush against the right border
                 gap = w - 8 - len(label) - (len(detail) + 1 if detail else 0)
-                dots = FAINT(" " + "·" * max(1, gap - 1))
-                rows.append(f"{mark} {label}{dots}" + (f" {GREY(detail)}" if detail else ""))
+                rows.append(f"{mark} {label}{FAINT(' ' + '·' * max(1, gap - 1))}" + (f" {GREY(detail)}" if detail else ""))
             out += box(rows, w, "PROGRESS")
-        hint = self.status or GREY(self.items[self.selected][1])
-        out += ["", pad(hint, w, "center"), pad(FAINT("↑↓ move  ·  enter choose  ·  q quit"), w, "center")]
         return out
 
-    def render(self, below=""):
-        """Draw the whole screen in place: home the cursor, overwrite, clear the rest."""
+    def hints(self, text):
+        return ["", FAINT(text)]
+
+    def field_box(self, label, value, secret=False, state="edit", note=""):
+        """A one-line input box. state: edit, check (spinner), ok, bad."""
+        width = min(48, screen_width())
+        room = width - 10
+        if state == "ok":
+            line, edge = GREEN("✔  access granted"), GREEN
+        elif state == "check":
+            line, edge = ORANGE(SPIN[int(time.time() * FPS) % len(SPIN)]) + GREY("  checking…"), ORANGE
+        else:
+            shown = "•" * len(value) if secret else value
+            shown = shown[-room:]
+            cursor = ORANGE("▏") if int(time.time() * 2) % 2 == 0 else " "
+            line = f"{ORANGE('❯')} {shown}{cursor}" if value else f"{ORANGE('❯')} {cursor}{FAINT(note)}"
+            edge = RED if state == "bad" else FAINT
+        return box([line], width, label, edge=edge)
+
+    # ── widgets ──
+
+    def text_field(self, label, default="", secret=False, hint="enter  ·  esc back", message="", above=None):
+        """An animated input box. Returns the text, raises Cancel on Esc."""
         if not TTY:
-            return
-        frame = self.frame()
-        if len(frame) + 2 > shutil.get_terminal_size((80, 24)).lines:
-            frame = self.frame(compact=True)
-        lines = ["  " + line + "\033[K" for line in frame]
-        sys.stdout.write("\033[H" + "\n".join(lines) + "\n\033[J" + below)
-        sys.stdout.flush()
-
-    # ── input ──
-
-    def ask(self, label, default="", secret=False):
-        prompt = f"  {ORANGE('❯')} {BOLD(label)}" + (GREY(f"  [{default}]") if default else "") + "  "
-        if TTY:
-            self.render()
-            sys.stdout.write("\033[?25h")  # show the cursor while typing
-        try:
-            value = (getpass.getpass(prompt) if secret else input(prompt)).strip() or default
-        finally:
-            if TTY:
-                sys.stdout.write("\033[?25l")
-        self.form.append((label, "•" * 10 if secret else value))
-        return value
+            prompt = f"  ❯ {label}" + (f" [{default}]" if default else "") + ": "
+            return (getpass.getpass(prompt) if secret else input(prompt)).strip() or default
+        value = default
+        while True:
+            def build(compact):
+                return (self.hero(compact) + [""] + (above() if above else [])
+                        + self.field_box(label, value, secret) + ["", message] + self.hints(hint))
+            self.show(build)
+            key = read_key(1 / FPS)
+            if key is None:
+                continue
+            if key == "enter":
+                return value.strip()
+            if key == "esc":
+                raise Cancel
+            if key == "backspace":
+                value = value[:-1]
+            elif len(key) == 1 and key.isprintable():
+                value += key
 
     def confirm(self, question, default=True):
-        hint = "Y/n" if default else "y/N"
         if not TTY:
-            answer = input(f"  ❯ {question} [{hint}] ").strip().lower()
+            answer = input(f"  ❯ {question} [{'Y/n' if default else 'y/N'}] ").strip().lower()
             return default if not answer else answer.startswith("y")
-        self.render(f"  {ORANGE('❯')} {BOLD(question)}  {GREY(hint)}")
+        yes = default
         while True:
-            key = read_key()
-            if key in ("y", "n"):
-                return key == "y"
-            if key == "enter":
-                return default
-            if key in ("q", "esc"):
+            buttons = (SELECTED("  Yes  ") if yes else GREY("  Yes  ")) + "   " + (SELECTED("  No  ") if not yes else GREY("  No  "))
+            self.show(lambda compact: self.hero(compact) + [""] + self.panels() + ["", BOLD(question), "", buttons]
+                      + self.hints("←→ choose  ·  enter confirm  ·  esc back"))
+            key = read_key(1 / FPS)
+            if key is None:
+                continue
+            if key in ("left", "right", "tab", "h", "l"):
+                yes = not yes
+            elif key.lower() in ("y", "n"):
+                return key.lower() == "y"
+            elif key == "enter":
+                return yes
+            elif key == "esc":
                 return False
 
     def task(self, label, work):
         """Run work() in the background with a spinner. work returns (ok, detail)."""
         self.log.append(("", label, ""))
-        result = {}
-        thread = threading.Thread(target=lambda: result.setdefault("r", work()), daemon=True)
-        thread.start()
-        tick = 0
-        while thread.is_alive():
-            self.log[-1] = (SPIN[tick % len(SPIN)], label, "")
-            self.render()
-            tick += 1
-            time.sleep(0.08)
-        ok, detail = result.get("r", (False, "failed"))
+        self.busy = True
+        def tick(n):
+            self.log[-1] = (SPIN[n % len(SPIN)], label, "")
+            self.show(lambda compact: self.hero(compact) + [""] + self.panels() + self.hints("working…"))
+        try:
+            ok, detail = in_background(work, tick) or (False, "failed")
+        finally:
+            self.busy = False
         self.log[-1] = ("ok" if ok else "fail", label, detail)
-        if TTY:
-            self.render()
-        else:
+        if not TTY:
             print(f"  {'✔' if ok else '✘'} {label}  {detail}")
         return ok
 
-    def reset(self):
-        self.plan, self.form, self.log, self.status = [], [], [], ""
+    # ── password gate and entrance ──
+
+    def gate(self):
+        """First screen: hero and a password box. Returns True once unlocked."""
+        message = ""
+        for attempt in range(5):
+            password = self.text_field("PASSWORD", secret=True, message=message,
+                                       hint="enter  unlock  ·  esc  quit")
+            if not TTY:
+                ok = self.check(password)
+            else:
+                found = {}
+                def work():
+                    found["ok"] = self.check(password)
+                    return found["ok"]
+                in_background(work, lambda n: self.show(
+                    lambda compact: self.hero(compact) + [""] + self.field_box("PASSWORD", "", state="check")
+                    + ["", ""] + self.hints("")))
+                ok = found.get("ok")
+            if ok:
+                self.entrance()
+                return True
+            left = 4 - attempt
+            message = RED(f"wrong password  ·  {left} {'try' if left == 1 else 'tries'} left") if left else ""
+            self.shake(password)
+            time.sleep(0.6 * (attempt + 1))  # each wrong guess waits longer
+        self.status = RED("Too many attempts. Ask whoever runs the server for the password.")
+        return False
+
+    def check(self, password):
+        try:
+            self.secrets = unseal_secrets(password)
+            return True
+        except (ValueError, KeyError):
+            return False
+
+    def shake(self, password):
+        """Wiggle the password box left and right in red."""
+        if not TTY:
+            print("  ✘ wrong password")
+            return
+        for offset in (3, -3, 2, -2, 1, -1, 0):
+            field = [" " * max(0, offset * 2) + line + " " * max(0, -offset * 2) for line in
+                     self.field_box("PASSWORD", password, secret=True, state="bad")]
+            self.show(lambda compact: self.hero(compact) + [""] + field + ["", RED("wrong password")] + self.hints(""))
+            time.sleep(0.045)
+
+    def entrance(self):
+        """Unlocked: green box, a jumping character, WELCOME typed out, then the menu slides in."""
+        if not TTY:
+            print("  ✔ access granted")
+            return
+        name = (self.saved.get("name") or "").strip()
+        greeting = "W E L C O M E" + (f" ,   {spaced(name)}" if name else "")
+        menu = self.menu_box()
+        clock = time.time()
+        while True:
+            t = time.time() - clock
+            if t < 0.7:      # 1. the box turns green
+                body = [""] + self.field_box("PASSWORD", "", state="ok")
+                top = self.hero(arms_up=True, tagline="access granted")
+            elif t < 1.9:    # 2. the character jumps, arms up while in the air
+                up = int(t * 7) % 2 == 0
+                body = [""] + self.field_box("PASSWORD", "", state="ok")
+                top = self.hero(lift=up, arms_up=up, tagline="access granted")
+            elif t < 3.0:    # 3. the greeting types itself out
+                shown = greeting[: int((t - 1.9) / 1.1 * len(greeting)) + 1]
+                top = self.hero(title=shown + ORANGE("█"), tagline="access granted")
+                body = []
+            elif t < 3.8:    # 4. the menu slides in, line by line
+                top = self.hero(title=greeting, tagline="access granted")
+                body = [""] + menu[: int((t - 3.0) / 0.8 * len(menu)) + 1]
+            else:
+                break
+            self.show(lambda compact, top=top, body=body: (self.hero(True, title=greeting) if compact else top) + body)
+            if read_key(1 / 30) is not None:  # any key skips the show
+                break
+
+    # ── menu ──
+
+    def menu_box(self):
+        width = min(42, screen_width())
+        lines = []
+        for i, (label, _, _) in enumerate(self.items):
+            text = f"  ❯  {label}" if i == self.selected else f"     {label}"
+            lines.append(SELECTED(pad(text, width - 6)) if i == self.selected else GREY(pad(text, width - 6)))
+        return box(lines, width, "MENU")
+
+    def status_line(self):
+        def mark(good, text):
+            return (GREEN("✔") if good else GREY("○")) + " " + GREY(text)
+        return "   ".join([mark(True, "python " + sys.version.split()[0]),
+                           mark(bool(self.claude), "claude code" if self.claude else "no claude code"),
+                           mark(CFG.exists(), "set up" if CFG.exists() else "not set up")])
+
+    def choose(self):
+        if not TTY:
+            for i, (label, _, _) in enumerate(self.items):
+                print(f"  [{'q' if label == 'Quit' else i + 1}] {label}")
+            key = input("  ❯ Choose: ").strip().lower()
+            if key == "q":
+                return len(self.items) - 1
+            return int(key) - 1 if key.isdigit() and 0 < int(key) <= len(self.items) else None
+        while True:
+            note = self.status or GREY(self.items[self.selected][1])
+            self.show(lambda compact: self.hero(compact) + [""] + self.menu_box() + [self.status_line()]
+                      + self.panels() + ["", note] + self.hints("↑↓ move  ·  enter choose  ·  q quit"))
+            key = read_key(1 / FPS)
+            if key is None:
+                continue
+            if key in ("up", "k"):
+                self.selected = (self.selected - 1) % len(self.items)
+            elif key in ("down", "j"):
+                self.selected = (self.selected + 1) % len(self.items)
+            elif key == "enter":
+                return self.selected
+            elif key in ("q", "esc"):
+                return len(self.items) - 1
+            elif key.isdigit() and 0 < int(key) <= len(self.items):
+                self.selected = int(key) - 1
+                return self.selected
+            self.status = ""
+
+    def loop(self):
+        while True:
+            choice = self.choose()
+            if choice is None:
+                continue
+            action = self.items[choice][2]
+            if action is None:
+                return
+            self.plan, self.form, self.log, self.status = [], [], [], ""
+            try:
+                action()
+            except (KeyboardInterrupt, Cancel):
+                self.plan, self.status = [], RED("Cancelled.")  # cancels the action, not the app
 
     # ── actions ──
 
@@ -267,56 +468,53 @@ class Installer:
         self.plan = [f"{ORANGE('▸')} add the ClaudeLimitBot marketplace to Claude Code",
                      f"{ORANGE('▸')} install the limit-bot plugin, a hook that runs on rate limits",
                      f"{ORANGE('▸')} save your name, email and webhook to {GREY('~/.config/limit-bot')}"]
-        if not self.confirm("Continue?"):
+        if not self.confirm("Install ClaudeLimitBot?"):
             self.status = GREY("Install skipped.")
             return
         self.plan = []
-        cur = json.loads(CFG.read_text()) if CFG.exists() else {}
-        name = self.ask("Display name", cur.get("name", ""))
-        email = self.ask("Email", cur.get("email", ""))
+        name = self.text_field("DISPLAY NAME", self.saved.get("name", ""), above=self.panels)
+        self.form.append(("Display name", name))
+        email = self.text_field("EMAIL", self.saved.get("email", ""), above=self.panels)
+        self.form.append(("Email", email))
         if not name or not email:
             self.status = RED("A name and an email are both needed.")
             return
-        webhook = self.unlock() if SEALED.exists() else self.ask("Webhook URL", cur.get("webhook", ""), secret=True)
-        if not webhook:
-            return
-        if not re.match(r"https://(\w+\.)?discord(app)?\.com/api/webhooks/\d+/.+", webhook):
+        webhook = self.secrets.get("webhook") or self.text_field("WEBHOOK URL", self.saved.get("webhook", ""), secret=True, above=self.panels)
+        if not re.match(r"https://(\w+\.)?discord(app)?\.com/api/webhooks/\d+/.+", webhook or ""):
             self.status = RED("That is not a Discord webhook URL.")
             return
+        self.form.append(("Webhook", GREEN("unlocked") if self.secrets.get("webhook") else "•" * 10))
+        token, discord_id = self.secrets.get("token"), None
+        if token:
+            username = self.text_field("DISCORD USERNAME", self.saved.get("username", ""), above=self.panels)
+            found = {}
+            def lookup():
+                try:
+                    found["m"] = find_member(token, username)
+                except Exception as e:
+                    return False, str(e)[:50]
+                if not found["m"]:
+                    return False, "not on the server"
+                seats = {"premium": "Premium Seat", "standard": "Standard Seat", None: "no seat"}
+                return True, f"@{found['m'][1]} · {seats[found['m'][2]]}"
+            if not self.task("Finding you on Discord", lookup):
+                self.status = RED(f"Couldn't find {username} on the server. Use your Discord username.")
+                return
+            discord_id = found["m"][0]
+            self.form.append(("Discord", f"@{found['m'][1]}"))
         steps = [
             ("Adding marketplace", lambda: outcome(run([self.claude, "plugin", "marketplace", "add", REPO]))),
             ("Installing plugin", lambda: outcome(run([self.claude, "plugin", "install", f"{PLUGIN}@{MKT}"]))),
             ("Saving settings", lambda: outcome(run([sys.executable, str(NOTIFY), "setup", "--name", name,
-                                                     "--email", email, "--webhook", webhook]), "only you can read it")),
+                                                     "--email", email, "--webhook", webhook]
+                                                    + (["--token", token, "--discord-id", discord_id] if token else [])),
+                                                "only you can read it")),
         ]
         if all(self.task(label, work) for label, work in steps):
+            self.saved = {"name": name, "email": email}
             self.status = GREEN("Installed. Restart Claude Code to switch it on.")
-            if self.confirm("Send a test message now?"):
-                self.task("Sending test message", lambda: outcome(run([sys.executable, str(NOTIFY), "test"]), "check the channel"))
         else:
-            self.status = RED("Something failed. The red line above says what.")
-
-    def unlock(self):
-        for attempt in range(5):
-            password = self.ask("Password", secret=True)
-            self.form.pop()  # don't stack a row per attempt
-            found = {}
-            def work():
-                try:
-                    found["webhook"] = unseal_webhook(password)
-                    return True, "accepted"
-                except ValueError:
-                    return False, "wrong password"
-            if self.task("Unlocking", work):
-                self.form.append(("Password", GREEN("accepted")))
-                return found["webhook"]
-            time.sleep(1.5 * (attempt + 1))
-        self.status = RED("Too many attempts. Ask whoever runs the server for the password.")
-        return None
-
-    def test(self):
-        self.task("Sending test message",
-                  lambda: outcome(run([sys.executable, str(NOTIFY), "test"]), "check the channel"))
+            self.status = RED("Something failed. The red line says what.")
 
     def update(self):
         if not self.claude:
@@ -337,59 +535,22 @@ class Installer:
         self.task("Deleting settings", lambda: (shutil.rmtree(CFG.parent, ignore_errors=True), (True, ""))[1])
         self.status = GREEN("Removed.")
 
-    # ── main loop ──
-
-    def choose(self):
-        """Wait for a menu choice; returns the index of the item."""
-        if not TTY:
-            for i, (label, _, _) in enumerate(self.items):
-                print(f"  [{'q' if label == 'Quit' else i + 1}] {label}")
-            key = input("  ❯ Choose: ").strip().lower()
-            return len(self.items) - 1 if key == "q" else int(key) - 1 if key.isdigit() and 0 < int(key) <= len(self.items) else None
-        while True:
-            self.render()
-            key = read_key()
-            if key in ("up", "k"):
-                self.selected = (self.selected - 1) % len(self.items)
-            elif key in ("down", "j"):
-                self.selected = (self.selected + 1) % len(self.items)
-            elif key == "enter":
-                return self.selected
-            elif key in ("q", "esc"):
-                return len(self.items) - 1
-            elif key.isdigit() and 0 < int(key) <= len(self.items):
-                self.selected = int(key) - 1
-                return self.selected
-
-    def loop(self):
-        while True:
-            choice = self.choose()
-            if choice is None:
-                continue
-            action = self.items[choice][2]
-            if action is None:
-                return
-            self.reset()
-            try:
-                action()
-            except KeyboardInterrupt:
-                # Ctrl+C during an action cancels just that action.
-                self.plan = []
-                self.status = RED("Cancelled.")
-            except EOFError:
-                return
-
 
 def main():
-    app = Installer()
+    app = App()
+    restore_keys = key_mode()
     if TTY:
         sys.stdout.write("\033[?1049h\033[?25l\033[H\033[2J")  # own screen, hidden cursor
     message = GREY("  Bye.")
     try:
-        app.loop()
-    except (KeyboardInterrupt, EOFError):
-        message = GREY("  Cancelled.")  # Ctrl+C at the menu leaves cleanly
+        if not SEALED.exists() or app.gate():
+            app.loop()
+        else:
+            message = GREY("  Locked.")
+    except (KeyboardInterrupt, EOFError, Cancel):
+        message = GREY("  Bye.")  # Ctrl+C or Esc on the first screen leaves cleanly
     finally:
+        restore_keys()
         if TTY:
             sys.stdout.write("\033[?25h\033[?1049l")  # always give the terminal back
             sys.stdout.flush()
