@@ -271,7 +271,8 @@ def wait():
                 return
             send_due()
             LOCK.touch()
-            time.sleep(max(1, min(60, min(e["due"] for e in pending) - time.time())))
+            # at least 5 s between rounds, so a failed send (offline) retries calmly
+            time.sleep(max(5, min(60, min(e["due"] for e in pending) - time.time())))
     finally:
         LOCK.unlink(missing_ok=True)
 

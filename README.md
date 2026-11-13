@@ -18,11 +18,19 @@ If the computer was off at that moment, the reminder goes out the next time Clau
 
 You need [Claude Code](https://claude.ai/code), Python 3 and the access password (ask whoever runs your server).
 
+**Linux / macOS**
+
 ```bash
-git clone https://github.com/SandwichEater577/ClaudeLimitBot.git && cd ClaudeLimitBot && ./installer
+git clone https://github.com/SandwichEater577/ClaudeLimitBot.git ~/ClaudeLimitBot 2>/dev/null || git -C ~/ClaudeLimitBot pull -q; python3 ~/ClaudeLimitBot/installer
 ```
 
-On Windows, run `python installer` instead of `./installer`.
+**Windows (PowerShell)**
+
+```powershell
+if (Test-Path $HOME\ClaudeLimitBot) { git -C $HOME\ClaudeLimitBot pull -q } else { git clone https://github.com/SandwichEater577/ClaudeLimitBot.git $HOME\ClaudeLimitBot }; python $HOME\ClaudeLimitBot\installer
+```
+
+The same line installs and updates: run it again any time to get the newest version.
 
 A menu opens. Choose **Install**, then enter the access password, your name, email and Discord username. The password unlocks the channel's webhook and a read-only bot token, both stored encrypted in `sealed.json` (scrypt key derivation, so every guess is slow). The bot token can only look up members and roles; it can't read or post in any channel. The installer adds the plugin to Claude Code and saves your settings to `~/.config/limit-bot/config.json`, readable only by you. Restart Claude Code afterwards. The menu can also update the plugin or remove it.
 

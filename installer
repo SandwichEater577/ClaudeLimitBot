@@ -511,7 +511,7 @@ class App:
                                                 "only you can read it")),
         ]
         if all(self.task(label, work) for label, work in steps):
-            self.saved = {"name": name, "email": email}
+            self.saved = {"name": name, "email": email, "username": username if token else ""}
             self.status = GREEN("Installed. Restart Claude Code to switch it on.")
         else:
             self.status = RED("Something failed. The red line says what.")
@@ -520,7 +520,11 @@ class App:
         if not self.claude:
             self.status = RED("Claude Code is not installed.")
             return
-        self.task("Updating plugin", lambda: outcome(run([self.claude, "plugin", "update", f"{PLUGIN}@{MKT}"]), "up to date"))
+        if (HERE / ".git").exists() and shutil.which("git"):
+            self.task("Updating this folder", lambda: outcome(run(["git", "-C", str(HERE), "pull", "--ff-only"])))
+        if self.task("Refreshing marketplace", lambda: outcome(run([self.claude, "plugin", "marketplace", "update", MKT]))):
+            if self.task("Updating plugin", lambda: outcome(run([self.claude, "plugin", "update", f"{PLUGIN}@{MKT}"]), "up to date")):
+                self.status = GREEN("Updated. Restart Claude Code to use the new version.")
 
     def uninstall(self):
         self.plan = [f"{ORANGE('▸')} remove the limit-bot plugin and its marketplace",
