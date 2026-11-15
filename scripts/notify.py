@@ -7,6 +7,8 @@ and again when the limit is over. Standard library only.
     notify.py wait       background waiter that sends reminders on time
     notify.py setup      save settings (the installer calls this)
     notify.py test       post a preview with no pings
+    notify.py status     show the limit you're waiting out, if any
+    notify.py back       limit reset early: post "limit is over" now
 """
 import argparse, collections, datetime, json, os, re, subprocess, sys, time, urllib.error, urllib.request
 from pathlib import Path
@@ -21,6 +23,8 @@ WINDOW = {"5-hour": 5 * 3600, "weekly": 7 * 86400, "usage": 5 * 3600}
 SEATS = ("premium", "standard")
 ORANGE, GREEN, GOLD = 0xD97757, 0x5FAF7A, 0xF4C542
 COOLDOWN = 600
+WEBHOOK = re.compile(r"https://(\w+\.)?discord(app)?\.com/api/webhooks/\d+/.+")
+MONTHS = {m: i + 1 for i, m in enumerate("jan feb mar apr may jun jul aug sep oct nov dec".split())}
 
 
 # ─── storage ───────────────────────────────────────────────────────────────────
@@ -169,9 +173,15 @@ def back_at(due, kind):
     return ts(due, "f" if kind == "weekly" else "t")
 
 
+def back_line(due, kind, exact):
+    if exact:
+        return f"Back {ts(due, 'R')}, at {back_at(due, kind)}."
+    return f"Back {ts(due, 'R')}, around {back_at(due, kind)} (estimated)."
+
+
 # ─── the messages ──────────────────────────────────────────────────────────────
 
-def send_limit(cfg, kind, model, tokens, start, due, seat, held, total, preview=False):
+def send_limit(cfg, kind, model, tokens, start, due, seat, held, total, preview=False, exact=False):
     if seat:
         content = f"{R('owner')}, move {U(cfg)} from {R(seat)} to {R('none')}."
     else:
@@ -184,8 +194,7 @@ def send_limit(cfg, kind, model, tokens, start, due, seat, held, total, preview=
         {"name": "This session", "value": f"{tokens:,} tokens", "inline": True},
         {"name": "Free seats after the move", "value": counters(held, total, {seat: -1} if seat else {}), "inline": False},
     ]
-    description = (f"{who(cfg)} hit the **{kind}** limit on **Claude Code**.\n"
-                   f"Back {ts(due, 'R')}, at {back_at(due, kind)}.")
+    description = f"{who(cfg)} hit the **{kind}** limit on **Claude Code**.\n" + back_line(due, kind, exact)
     roles = [] if preview else [role("owner")]
     post(cfg, content, card(ORANGE, "◆  LIMIT REACHED", description, fields), roles=roles)
     if seat == "premium":
@@ -196,7 +205,7 @@ def send_limit(cfg, kind, model, tokens, start, due, seat, held, total, preview=
         post(cfg, content, card(GOLD, "◆  PREMIUM SEAT OPEN", description, fields), everyone=not preview)
 
 
-def send_over(cfg, entry, preview=False):
+def send_over(cfg, entry, preview=False, early=False):
     seat = entry.get("seat")
     current, held, total = lookup(cfg)
     if seat:
@@ -210,7 +219,7 @@ def send_over(cfg, entry, preview=False):
         {"name": "Started", "value": ts(entry["start"], "t"), "inline": True},
         {"name": "Free seats after the move", "value": counters(held, total, change), "inline": False},
     ]
-    description = f"{who(cfg)} can use **Claude Code** again."
+    description = f"{who(cfg)} can use **Claude Code** again" + (", earlier than expected." if early else ".")
     users = [cfg["discord_id"]] if cfg.get("discord_id") and not preview else []
     if preview:
         content = "**Preview, nobody was pinged.**\n" + content
@@ -308,6 +317,49 @@ def limit_kind(text):
     return "usage"
 
 
+def reset_time(text, now):
+    """When the limit resets, read from Claude Code's error text, or None.
+    Understands 'limit reached|1767225600', 'resets 3pm (Europe/Warsaw)',
+    'resets Nov 20, 3:30pm' and 'resets in 2h 15m'."""
+    t = text or ""
+    due = None
+    m = re.search(r"\|\s*(\d{10})\b", t)
+    if m:
+        due = int(m.group(1))
+    elif m := re.search(r"resets?\s+in\s+(?:(\d+)\s*h\w*)?\s*(?:(\d+)\s*m\w*)?", t, re.I):
+        if m.group(1) or m.group(2):
+            due = now + int(m.group(1) or 0) * 3600 + int(m.group(2) or 0) * 60
+    elif m := re.search(r"resets?\s+(?:at\s+|on\s+)?(?:([A-Za-z]{3})[a-z]*\.?\s+(\d{1,2}),?\s+(?:at\s+)?)?"
+                        r"(\d{1,2})(?::(\d{2}))?\s*([ap]\.?m\.?)?(?:\s*\(([^)]+)\))?", t, re.I):
+        mon, day, hour, minute, ampm, zone = m.groups()
+        hour, minute = int(hour), int(minute or 0)
+        if ampm:
+            hour = hour % 12 + (12 if ampm[0].lower() == "p" else 0)
+        if hour > 23 or minute > 59 or (mon and mon[:3].lower() not in MONTHS):
+            return None
+        tz = None
+        if zone:
+            try:
+                import zoneinfo
+                tz = zoneinfo.ZoneInfo(zone.strip())
+            except Exception:  # unknown zone, or no tz database (Windows): use local time
+                tz = None
+        base = datetime.datetime.fromtimestamp(now, tz) if tz else datetime.datetime.fromtimestamp(now).astimezone()
+        try:
+            when = base.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            if mon:
+                when = when.replace(month=MONTHS[mon[:3].lower()], day=int(day))
+                if when.timestamp() < now:
+                    when = when.replace(year=when.year + 1)
+        except ValueError:  # e.g. Feb 30
+            return None
+        while when.timestamp() <= now:
+            when += datetime.timedelta(days=1)
+        due = when.timestamp()
+    # anything outside a week (plus slack) is a misread, not a reset time
+    return due if due and now < due <= now + 8 * 86400 else None
+
+
 def hook():
     try:
         data = json.load(sys.stdin)
@@ -319,13 +371,18 @@ def hook():
         last = HOME / "last-sent"
         if last.exists() and now - float(last.read_text() or 0) < COOLDOWN:
             return
-        kind = limit_kind((data.get("last_assistant_message") or "") + " " + (data.get("error_details") or ""))
+        text = (data.get("last_assistant_message") or "") + " " + (data.get("error_details") or "")
+        kind = limit_kind(text)
+        reset = reset_time(text, now)
+        if reset and kind == "usage":
+            kind = "weekly" if reset - now > 86400 else "5-hour"
+        due = reset or now + WINDOW[kind]
         model, tokens = transcript_stats(data.get("transcript_path", ""))
-        due = now + WINDOW[kind]
         seat, held, total = lookup(cfg)
-        send_limit(cfg, kind, model, tokens, now, due, seat, held, total)
+        send_limit(cfg, kind, model, tokens, now, due, seat, held, total, exact=bool(reset))
         private_write(last, str(now))
-        save_pending(pending + [{"id": f"{int(now)}", "start": now, "due": due, "seat": seat, "kind": kind}])
+        save_pending(pending + [{"id": f"{int(now)}", "start": now, "due": due, "seat": seat, "kind": kind,
+                                 "exact": bool(reset)}])
         spawn_waiter()
     except Exception as e:  # never break the user's session
         print(f"limit-bot: {e}", file=sys.stderr)
@@ -342,7 +399,7 @@ def session():
 def setup(a):
     cfg = {"name": a.name, "email": a.email,
            "webhook": a.webhook or os.environ.get("DISCORD_WEBHOOK", "")}
-    if not cfg["webhook"].startswith("https://discord.com/api/webhooks/"):
+    if not WEBHOOK.match(cfg["webhook"]):
         sys.exit("A Discord webhook URL is needed.")
     if a.token:
         cfg["token"] = a.token
@@ -362,6 +419,53 @@ def test():
     print("Preview sent.")
 
 
+def local(t):
+    return datetime.datetime.fromtimestamp(t).strftime("%a %d %b, %H:%M")
+
+
+def status():
+    if not CFG.exists():
+        print("Not set up. Run the installer from the ClaudeLimitBot folder.")
+        return
+    cfg = load_cfg()
+    print(f"limit-bot v{VERSION}, posting as {cfg.get('name')} ({'linked to Discord' if cfg.get('discord_id') else 'no Discord link'})")
+    pending = sorted(load_pending(), key=lambda e: e["due"])
+    if not pending:
+        print("No limit right now. Nothing waiting to be sent.")
+        return
+    for e in pending:
+        left = e["due"] - time.time()
+        when = f"in {int(left // 3600)}h {int(left % 3600 // 60)}m" if left > 0 else "now (overdue, sends on next check)"
+        print(f"{e['kind']} limit hit {local(e['start'])}. Back {local(e['due'])}, {when}"
+              f"{'' if e.get('exact') else ' (estimated)'}. Seat to return: {seat_name(e.get('seat'))}.")
+    try:
+        fresh = time.time() - LOCK.stat().st_mtime < 180
+    except FileNotFoundError:
+        fresh = False
+    print("Reminder process: " + ("running." if fresh else "not running, it starts with the next Claude Code session."))
+
+
+def back():
+    """The limit reset sooner than expected: post "limit is over" now and drop the reminder."""
+    cfg = load_cfg()
+    pending = load_pending()
+    if not pending:
+        print("No limit is being waited out, so there's nothing to send.")
+        return
+    for entry in pending:
+        claim = HOME / f"sending-{entry['id']}"
+        try:
+            os.close(os.open(claim, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+        except FileExistsError:
+            continue  # the waiter is sending this one right now
+        try:
+            send_over(cfg, entry, early=entry["due"] > time.time())
+            save_pending([e for e in load_pending() if e["id"] != entry["id"]])
+        finally:
+            claim.unlink(missing_ok=True)
+    print("Sent. The Team Owner was told your limit is over.")
+
+
 def main():
     p = argparse.ArgumentParser()
     s = p.add_subparsers(dest="cmd", required=True)
@@ -371,10 +475,11 @@ def main():
     su.add_argument("--webhook")
     su.add_argument("--token")
     su.add_argument("--discord-id")
-    for name in ("hook", "session", "wait", "test"):
+    for name in ("hook", "session", "wait", "test", "status", "back"):
         s.add_parser(name)
     a = p.parse_args()
-    {"setup": lambda: setup(a), "hook": hook, "session": session, "wait": wait, "test": test}[a.cmd]()
+    {"setup": lambda: setup(a), "hook": hook, "session": session, "wait": wait, "test": test,
+     "status": status, "back": back}[a.cmd]()
 
 
 if __name__ == "__main__":

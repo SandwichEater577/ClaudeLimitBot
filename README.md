@@ -36,6 +36,11 @@ A menu opens. Choose **Install**, then enter the access password, your name, ema
 
 Already installed and want to check it works? Inside Claude Code run `/limit-bot:setup`, which posts a preview with no pings.
 
+Other commands inside Claude Code:
+
+- `/limit-bot:status` shows the limit you're waiting out, when you're back, and whether the reminder is scheduled.
+- `/limit-bot:back` is for when your limit is over sooner than expected. It tells the Team Owner right away and cancels the reminder.
+
 ## Server setup
 
 `server.json` holds the server's IDs: the guild, the `seat-count` channel and four roles (Team Owner, Premium Seat, Standard Seat, No Seat). The seat totals live in the topic of the private `seat-count` channel, for example `premium 1 · standard 4`, so the owner can change them without a new release.
@@ -51,6 +56,6 @@ The webhook is never stored in this repo in plain text. To seal a new one, run `
 ## Limits
 
 - Claude on the web can't be detected. Only Claude Code is reported.
-- Hook payloads carry no reset time, so "back at" is counted from the moment the limit was hit (5 hours, or 7 days for weekly). The real reset can come a little earlier.
+- The reset time is read from Claude Code's error text (`resets 3pm`, `resets Nov 20, 3pm`, `resets in 2h`). If the text has none, "back at" is counted from the moment the limit was hit (5 hours, or 7 days for weekly), and the card says "estimated". Use `/limit-bot:back` if it resets sooner.
 - The limit type (5-hour or weekly) is guessed from the error text and may show as "usage".
 - Not yet tested on Windows.

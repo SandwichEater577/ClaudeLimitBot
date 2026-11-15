@@ -14,7 +14,7 @@ NOTIFY = HERE / "scripts" / "notify.py"
 SEALED = HERE / "sealed.json"
 CFG = Path.home() / ".config/limit-bot/config.json"
 REPO = "SandwichEater577/ClaudeLimitBot"
-MKT, PLUGIN, VERSION = "claude-limit-bot", "limit-bot", "1.2.0"
+MKT, PLUGIN, VERSION = "claude-limit-bot", "limit-bot", "1.3.0"
 TITLE, TAGLINE = "C L A U D E   L I M I T   B O T", "posts to Discord when you hit your limit"
 sys.path.insert(0, str(HERE / "scripts"))
 
